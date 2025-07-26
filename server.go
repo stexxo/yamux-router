@@ -26,15 +26,16 @@ type Server struct {
 	sessionsMu sync.RWMutex
 	sessions   map[string]*yamux.Session
 
-	handlersMu    sync.RWMutex
-	handlers      map[MessageType]MessageHandler
-	unkownHandler MessageHandler
+	handlersMu     sync.RWMutex
+	handlers       map[MessageType]MessageHandler
+	unknownHandler MessageHandler
+	errHandler     func(rw ResponseWriter, msg *Message, err error)
 }
 
 func NewServer(cfg *ServerCfg) (*Server, error) {
 	return &Server{
-		listener:      cfg.Listener,
-		unkownHandler: cfg.UnknownHandler,
+		listener:       cfg.Listener,
+		unknownHandler: cfg.UnknownHandler,
 	}, nil
 }
 
@@ -104,7 +105,9 @@ func (s *Server) serveSession(session *yamux.Session) {
 func (s *Server) serveStream(sessionId string, stream *yamux.Stream) {
 	for {
 		msg, err := newMessage(context.Background(), sessionId, stream)
-		if err != nil {
+		if errors.Is(err, io.EOF) {
+			return
+		} else if err != nil {
 			continue
 		}
 
@@ -115,13 +118,17 @@ func (s *Server) serveStream(sessionId string, stream *yamux.Stream) {
 		s.handlersMu.RUnlock()
 
 		if !ok {
-			handler = s.unkownHandler
+			handler = s.unknownHandler
 		}
 
-		handler(nil, msg)
+		resp := NewResponse(stream, msg.Type())
 
-		_, err = io.Copy(io.Discard, msg.Body())
+		handler(resp, msg)
 
+		err = errors.Join(resp.Close(), msg.body.Close())
+		if err != nil {
+			s.errHandler(resp, msg, err)
+		}
 	}
 }
 
